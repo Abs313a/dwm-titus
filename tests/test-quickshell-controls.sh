@@ -5,18 +5,88 @@ repo=$(
 	unset CDPATH
 	cd -- "$(dirname -- "$0")/.." && pwd
 )
-controls_model=$repo/config/quickshell/controls/ControlsModel.qml
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+for command_name in dbus-run-session quickshell; do
+	if ! command -v "$command_name" >/dev/null 2>&1; then
+		printf 'SKIP: %s is unavailable for ControlsModel volume-state test\n' "$command_name"
+		exit 77
+	fi
+done
 
-grep -F 'property string volumeIconState: root.volumeIconStateFor(root.volumePercent, root.volumeMuted)' "$controls_model" >/dev/null
-grep -F 'function volumeIconStateFor(percent, muted) {' "$controls_model" >/dev/null
-grep -F 'if (muted || percent <= 0) return "mute";' "$controls_model" >/dev/null
-grep -F 'if (percent <= 33) return "low";' "$controls_model" >/dev/null
-grep -F 'if (percent <= 66) return "medium";' "$controls_model" >/dev/null
-grep -F 'return "high";' "$controls_model" >/dev/null
+if [ "${DWM_CONTROLS_DBUS_SESSION:-0}" != 1 ]; then
+	exec env DWM_CONTROLS_DBUS_SESSION=1 dbus-run-session -- "$0" "$@"
+fi
+
+work=$(mktemp -d)
+cleanup() {
+	set +e
+	[ -n "${quickshell_pid:-}" ] && kill "$quickshell_pid" 2>/dev/null
+	[ -n "${quickshell_pid:-}" ] && wait "$quickshell_pid" 2>/dev/null
+	rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$work/bin"
+
+volume_config_home=$work/volume-config
+volume_home=$work/volume-home
+volume_runtime=$work/volume-runtime
+mkdir -p "$volume_config_home/quickshell" "$volume_home" "$volume_runtime"
+chmod 700 "$volume_runtime"
+cp -a "$repo/config/quickshell/." "$volume_config_home/quickshell/"
+
+cat >"$volume_config_home/quickshell/shell.qml" <<'QML'
+//@ pragma UseQApplication
+
+import Quickshell
+import Quickshell.Io
+import qs.controls
+
+ShellRoot {
+    ControlsModel { id: controlsModel }
+
+    IpcHandler {
+        target: "controls-volume-state-test"
+
+        function icon(percent: int, muted: bool): string {
+            return controlsModel.volumeIconStateFor(percent, muted);
+        }
+    }
+}
+QML
+
+env QT_QPA_PLATFORM=offscreen HOME="$volume_home" XDG_CONFIG_HOME="$volume_config_home" \
+	XDG_RUNTIME_DIR="$volume_runtime" quickshell --no-duplicate >"$work/volume-quickshell.log" 2>&1 &
+quickshell_pid=$!
+volume_shell=$volume_config_home/quickshell/shell.qml
+assert_volume_icon() {
+	actual=$(QT_QPA_PLATFORM=offscreen HOME="$volume_home" XDG_CONFIG_HOME="$volume_config_home" \
+		XDG_RUNTIME_DIR="$volume_runtime" quickshell ipc --path "$volume_shell" \
+		call controls-volume-state-test icon "$1" "$2" 2>/dev/null || true)
+	if [ "$actual" != "$3" ]; then
+		printf 'volume icon state for percent=%s muted=%s: got %s, want %s\n' "$1" "$2" "${actual:-<empty>}" "$3" >&2
+		return 1
+	fi
+}
+
+index=0
+while [ "$index" -lt 100 ]; do
+	if assert_volume_icon 1 false low; then
+		break
+	fi
+	index=$((index + 1))
+	sleep 0.05
+done
+if [ "$index" -eq 100 ]; then
+	tail -60 "$work/volume-quickshell.log" >&2
+	exit 1
+fi
+
+assert_volume_icon 0 false mute
+assert_volume_icon 1 true mute
+assert_volume_icon 33 false low
+assert_volume_icon 34 false medium
+assert_volume_icon 66 false medium
+assert_volume_icon 67 false high
 
 cat >"$work/bin/pactl" <<'SH'
 #!/bin/sh

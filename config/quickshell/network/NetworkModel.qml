@@ -11,7 +11,12 @@ Scope {
     property bool busy: false
     property bool editorAvailable: false
     property bool actionUsesPasswordStdin: false
-    property bool statusRefreshPending: false
+    property bool panelSnapshotPending: false
+    property bool panelSnapshotRescanPending: false
+    property bool settingsSnapshotPending: false
+    property bool settingsSnapshotRescanPending: false
+    property bool sharedSnapshotPending: false
+    property bool sharedSnapshotRescanPending: false
     property bool wifiPasswordPromptVisible: false
     property string wifiPasswordPromptOrigin: ""
     property int selectedIndex: 0
@@ -86,6 +91,51 @@ Scope {
     function stopUnownedWork(origin) {
         if (root.actionOrigin === origin && actionProcess.running) actionProcess.running = false;
         if (root.snapshotOrigin === origin && snapshotProcess.running) snapshotProcess.running = false;
+        root.clearPendingSnapshot(origin);
+    }
+
+    function snapshotPendingOwner(origin) {
+        return origin === "panel" || origin === "settings" ? origin : "shared";
+    }
+
+    function clearPendingSnapshot(origin) {
+        const owner = root.snapshotPendingOwner(origin);
+        if (owner === "panel") {
+            root.panelSnapshotPending = false;
+            root.panelSnapshotRescanPending = false;
+        } else if (owner === "settings") {
+            root.settingsSnapshotPending = false;
+            root.settingsSnapshotRescanPending = false;
+        } else {
+            root.sharedSnapshotPending = false;
+            root.sharedSnapshotRescanPending = false;
+        }
+    }
+
+    function queuePendingSnapshot(rescanWifi, origin) {
+        const owner = root.snapshotPendingOwner(origin);
+        if (owner === "panel") {
+            root.panelSnapshotPending = true;
+            root.panelSnapshotRescanPending = root.panelSnapshotRescanPending || rescanWifi === true;
+        } else if (owner === "settings") {
+            root.settingsSnapshotPending = true;
+            root.settingsSnapshotRescanPending = root.settingsSnapshotRescanPending || rescanWifi === true;
+        } else {
+            root.sharedSnapshotPending = true;
+            root.sharedSnapshotRescanPending = root.sharedSnapshotRescanPending || rescanWifi === true;
+        }
+    }
+
+    function refreshPendingSnapshot() {
+        const hasPending = root.panelSnapshotPending || root.settingsSnapshotPending || root.sharedSnapshotPending;
+        if (!hasPending) return;
+        const rescanWifi = root.panelSnapshotRescanPending || root.settingsSnapshotRescanPending
+            || root.sharedSnapshotRescanPending;
+        const origin = root.sharedSnapshotPending ? "shared" : (root.panelSnapshotPending ? "panel" : "settings");
+        root.clearPendingSnapshot("panel");
+        root.clearPendingSnapshot("settings");
+        root.clearPendingSnapshot("shared");
+        root.refresh(rescanWifi, origin);
     }
 
     function toggle() {
@@ -97,9 +147,14 @@ Scope {
     }
 
     function refresh(rescanWifi, origin) {
-        if (!root.active || snapshotProcess.running) return;
+        if (!root.active) return;
+        const requestOrigin = origin || (root.visible ? "panel" : "shared");
+        if (snapshotProcess.running) {
+            root.queuePendingSnapshot(rescanWifi, requestOrigin);
+            return;
+        }
         root.providerState = "loading";
-        root.snapshotOrigin = origin || (root.visible ? "panel" : "shared");
+        root.snapshotOrigin = requestOrigin;
         snapshotProcess.command = Commands.networkHelperCommand("snapshot", ["--rescan", rescanWifi ? "yes" : "no"]);
         snapshotProcess.running = true;
         if (!editorCheckProcess.running) {
@@ -115,10 +170,10 @@ Scope {
         const devices = [];
         const connections = [];
         const wifiNetworks = [];
+        const selectedBssid = root.selectedWifiNetwork() ? root.selectedWifiNetwork().bssid : "";
         let protocolValid = false;
         let providerSeen = false;
         let malformed = false;
-        let connectedDevice = "";
         root.operationState = "read-only";
 
         for (const line of text.trim().split("\n")) {
@@ -135,7 +190,6 @@ Scope {
             } else if (fields[0] === "network-device") {
                 if (fields.length < 5) { malformed = true; continue; }
                 devices.push({ "device": fields[1], "type": fields[2], "state": fields[3], "connection": fields[4] === "-" ? "" : fields[4] });
-                if (connectedDevice.length === 0 && fields[3] === "connected") connectedDevice = fields[1];
             } else if (fields[0] === "network-profile") {
                 if (fields.length < 6) { malformed = true; continue; }
                 connections.push({ "name": fields[1], "uuid": fields[2], "type": fields[3], "active": fields[4] === "yes", "device": fields[5] === "-" ? "" : fields[5] });
@@ -151,6 +205,8 @@ Scope {
             root.providerState = "failure";
             root.providerDetail = !protocolValid ? "Unsupported connectivity protocol" : "Malformed network provider record";
             root.statusText = "NET unavailable";
+            root.connectionKind = "disconnected";
+            root.wifiSignal = -1;
             root.devices = [];
             root.connections = [];
             root.wifiNetworks = [];
@@ -161,115 +217,47 @@ Scope {
         root.devices = devices;
         root.connections = connections;
         root.wifiNetworks = wifiNetworks;
+        root.selectedWifiIndex = -1;
+        for (let i = 0; i < wifiNetworks.length; i++) {
+            if (wifiNetworks[i].bssid === selectedBssid) {
+                root.selectedWifiIndex = i;
+                break;
+            }
+        }
+        if (root.wifiPasswordPromptVisible && root.selectedWifiIndex < 0) {
+            root.cancelWifiPasswordPrompt();
+        }
+        let ethernetDevice = "";
+        let wifiDevice = "";
+        let wifiSignal = -1;
+        for (const device of devices) {
+            if (device.state !== "connected") continue;
+            if (device.type === "ethernet" && ethernetDevice.length === 0) ethernetDevice = device.device;
+            if (device.type === "wifi" && wifiDevice.length === 0) wifiDevice = device.device;
+        }
+        if (ethernetDevice.length > 0) {
+            root.connectionKind = "ethernet";
+            root.wifiSignal = -1;
+        } else if (wifiDevice.length > 0) {
+            root.connectionKind = "wifi";
+            for (const network of wifiNetworks) {
+                if (!network.active || network.device !== wifiDevice) continue;
+                const signal = Number(network.signal);
+                if (isFinite(signal)) wifiSignal = Math.max(0, Math.min(100, Math.round(signal)));
+                break;
+            }
+            root.wifiSignal = wifiSignal;
+        } else {
+            root.connectionKind = "disconnected";
+            root.wifiSignal = -1;
+        }
         const stateReadable = root.providerState === "available" || root.providerState === "restricted";
+        const connectedDevice = ethernetDevice.length > 0 ? ethernetDevice : wifiDevice;
         root.statusText = stateReadable ? (connectedDevice.length > 0 ? "NET " + connectedDevice : "NET offline") : "NET unavailable";
         if (root.providerState !== "available") root.message = root.providerDetail;
         else if (!root.actionFailed && !root.busy) root.message = "";
         if (root.selectedIndex >= connections.length) root.selectedIndex = Math.max(0, connections.length - 1);
         if (root.selectedWifiIndex >= wifiNetworks.length) root.selectedWifiIndex = -1;
-    }
-
-    function parseStatus(text) {
-        const trimmed = text.trim();
-        const fields = trimmed.split("\t");
-        const kind = fields.length >= 4 ? fields[0] : "disconnected";
-        const device = fields.length >= 4 ? fields[1] : "";
-        const signal = fields.length >= 4 ? parseInt(fields[3], 10) : -1;
-
-        root.connectionKind = kind === "ethernet" || kind === "wifi" ? kind : "disconnected";
-        root.wifiSignal = root.connectionKind === "wifi" && !isNaN(signal)
-            ? Math.max(0, Math.min(100, signal)) : -1;
-        root.statusText = root.connectionKind === "disconnected" || device.length === 0
-            ? "NET offline" : "NET " + device;
-    }
-
-    function parseDevices(text) {
-        const rows = [];
-        const lines = text.trim().length > 0 ? text.trim().split("\n") : [];
-
-        for (const line of lines) {
-            const fields = line.split("\t");
-
-            if (fields.length < 4) {
-                continue;
-            }
-
-            rows.push({
-                "device": fields[0],
-                "type": fields[1],
-                "state": fields[2],
-                "connection": fields[3]
-            });
-        }
-
-        root.devices = rows;
-    }
-
-    function parseConnections(text) {
-        const rows = [];
-        const lines = text.trim().length > 0 ? text.trim().split("\n") : [];
-
-        for (const line of lines) {
-            const fields = line.split("\t");
-
-            if (fields.length < 5) {
-                continue;
-            }
-
-            rows.push({
-                "name": fields[0],
-                "uuid": fields[1],
-                "type": fields[2],
-                "active": fields[3] === "yes",
-                "device": fields[4]
-            });
-        }
-
-        root.connections = rows;
-        if (root.selectedIndex >= rows.length) {
-            root.selectedIndex = Math.max(0, rows.length - 1);
-        }
-    }
-
-    function parseWifiNetworks(text) {
-        const rows = [];
-        const lines = text.trim().length > 0 ? text.trim().split("\n") : [];
-        const selectedBssid = root.selectedWifiNetwork() ? root.selectedWifiNetwork().bssid : "";
-
-        for (const line of lines) {
-            const fields = line.split("\t");
-
-            if (fields.length < 7 || fields[2].length === 0) {
-                continue;
-            }
-
-            const security = fields[4] === "--" ? "" : fields[4];
-
-            rows.push({
-                "active": fields[0] === "*",
-                "bssid": fields[1],
-                "ssid": fields[2],
-                "signal": fields[3],
-                "security": security,
-                "channel": fields[5],
-                "device": fields[6],
-                "secured": security.length > 0
-            });
-        }
-
-        root.wifiNetworks = rows;
-        root.selectedWifiIndex = -1;
-
-        for (let i = 0; i < rows.length; i++) {
-            if (rows[i].bssid === selectedBssid) {
-                root.selectedWifiIndex = i;
-                break;
-            }
-        }
-
-        if (root.wifiPasswordPromptVisible && root.selectedWifiIndex < 0) {
-            root.cancelWifiPasswordPrompt();
-        }
     }
 
     function selectedWifiNetwork() {
@@ -424,48 +412,10 @@ Scope {
                 }
             }
         }
-        onRunningChanged: if (!running) root.snapshotOrigin = ""
-    }
-
-    Process {
-        id: statusProcess
-
-        command: Commands.networkHelperCommand("status")
-        running: false
-
         onRunningChanged: {
-            if (!running && root.statusRefreshPending) {
-                root.statusRefreshPending = false;
-                statusProcess.running = true;
-            }
-        }
-
-        stdout: StdioCollector {
-            onStreamFinished: {
-                root.parseStatus(this.text);
-            }
-        }
-    }
-
-    Process {
-        id: devicesProcess
-
-        command: Commands.networkHelperCommand("devices")
-        running: false
-
-        stdout: StdioCollector {
-            onStreamFinished: root.parseDevices(this.text)
-        }
-    }
-
-    Process {
-        id: connectionsProcess
-
-        command: Commands.networkHelperCommand("connections")
-        running: false
-
-        stdout: StdioCollector {
-            onStreamFinished: root.parseConnections(this.text)
+            if (running) return;
+            root.snapshotOrigin = "";
+            root.refreshPendingSnapshot();
         }
     }
 
@@ -504,17 +454,6 @@ Scope {
                     root.message = root.actionLabel + " failed: " + error;
                 }
             }
-        }
-    }
-
-    Process {
-        id: wifiScanProcess
-
-        command: Commands.networkHelperCommand("wifi-scan", ["--rescan", "no"])
-        running: false
-
-        stdout: StdioCollector {
-            onStreamFinished: root.parseWifiNetworks(this.text)
         }
     }
 

@@ -40,6 +40,13 @@ Scope {
     readonly property var audioSink: Pipewire.defaultAudioSink
     readonly property var audioSource: Pipewire.defaultAudioSource
 
+    function volumeIconStateFor(percent, muted) {
+        if (muted || percent <= 0) return "mute";
+        if (percent <= 33) return "low";
+        if (percent <= 66) return "medium";
+        return "high";
+    }
+
     function nativeAudioReady() {
         return root.audioSink !== null && root.audioSink.ready && root.audioSink.audio !== null;
     }

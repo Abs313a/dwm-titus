@@ -3,26 +3,22 @@ set -eu
 
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
-for command_name in Xvfb dbus-run-session quickshell; do
+for command_name in dbus-run-session quickshell; do
 	if ! command -v "$command_name" >/dev/null 2>&1; then
-		printf 'SKIP: %s is unavailable for NetworkModel refresh test\n' "$command_name"
+		printf 'SKIP: %s is unavailable for NetworkModel snapshot test\n' "$command_name"
 		exit 77
 	fi
 done
 
-if [ "${DWM_NETWORK_REFRESH_DBUS_SESSION:-0}" != 1 ]; then
-	exec env DWM_NETWORK_REFRESH_DBUS_SESSION=1 dbus-run-session -- "$0" "$@"
+if [ "${DWM_NETWORK_SNAPSHOT_DBUS_SESSION:-0}" != 1 ]; then
+	exec env DWM_NETWORK_SNAPSHOT_DBUS_SESSION=1 dbus-run-session -- "$0" "$@"
 fi
 
 work=$(mktemp -d)
 cleanup() {
 	set +e
-	for child_pid in "${quickshell_pid:-}" "${xvfb_pid:-}"; do
-		[ -n "$child_pid" ] && kill "$child_pid" 2>/dev/null
-	done
-	for child_pid in "${quickshell_pid:-}" "${xvfb_pid:-}"; do
-		[ -n "$child_pid" ] && wait "$child_pid" 2>/dev/null
-	done
+	[ -n "${quickshell_pid:-}" ] && kill "$quickshell_pid" 2>/dev/null
+	[ -n "${quickshell_pid:-}" ] && wait "$quickshell_pid" 2>/dev/null
 	rm -rf "$work"
 }
 trap cleanup EXIT HUP INT TERM
@@ -38,7 +34,6 @@ chmod 700 "$runtime"
 cp -a "$repo/config/quickshell/." "$config_home/quickshell/"
 mkfifo "$network_test_dir/monitor"
 printf '%s\n' ethernet >"$network_test_dir/state"
-printf '%s\n' 0 >"$network_test_dir/status-count"
 
 cat >"$config_home/quickshell/shell.qml" <<'QML'
 //@ pragma UseQApplication
@@ -51,10 +46,12 @@ ShellRoot {
     NetworkModel { id: networkModel }
 
     IpcHandler {
-        target: "network-refresh-test"
+        target: "network-snapshot-test"
 
-        function icon(): string { return networkModel.barIconState; }
-        function refresh(): void { networkModel.refresh(false); }
+        function state(): string { return networkModel.barIconState + "\t" + networkModel.wifiSignal; }
+        function refresh(rescan: bool, origin: string): void { networkModel.refresh(rescan, origin); }
+        function origin(): string { return networkModel.snapshotOrigin; }
+        function closeSettings(): void { networkModel.closeSettings(); }
     }
 }
 QML
@@ -65,61 +62,58 @@ set -eu
 
 test_dir=${DWM_TEST_NETWORK_DIR:?}
 
-case "${1:-}" in
-status)
-	count=$(cat "$test_dir/status-count")
+snapshot() {
+	printf '%s\n' "$*" >>"$test_dir/snapshot-args"
+	count=$(cat "$test_dir/snapshot-count")
 	count=$((count + 1))
-	printf '%s\n' "$count" >"$test_dir/status-count"
-	snapshot=$(cat "$test_dir/state")
+	printf '%s\n' "$count" >"$test_dir/snapshot-count"
 	if [ -e "$test_dir/block-next" ]; then
+		block=$(cat "$test_dir/block-next")
 		rm -f "$test_dir/block-next"
-		: >"$test_dir/status-blocked"
-		wait_index=0
-		while [ ! -e "$test_dir/release" ] && [ "$wait_index" -lt 500 ]; do
-			wait_index=$((wait_index + 1))
-			sleep 0.02
-		done
+		: >"$test_dir/snapshot-blocked-$block"
+		while [ ! -e "$test_dir/release-$block" ]; do sleep 0.02; done
 	fi
-	case "$snapshot" in
-	ethernet) printf 'ethernet\tenp2s0\tWired connection 1\t-1\n' ;;
-	wifi) printf 'wifi\twlan0\tTest Wi-Fi\t74\n' ;;
-	*) printf 'disconnected\t\t\t-1\n' ;;
+	printf 'connectivity-protocol\t1\t0\n'
+	printf 'provider\tnetwork\tavailable\tdelegated\tTest NetworkManager snapshot\n'
+	case "$(cat "$test_dir/state")" in
+	ethernet)
+		printf 'network-device\tenp2s0\tethernet\tconnected\tWired connection 1\n'
+		printf 'network-device\twlan0\twifi\tdisconnected\t-\n'
+		;;
+	wifi)
+		printf 'network-device\twlan0\twifi\tconnected\tTest Wi-Fi\n'
+		printf 'wifi-network\t*\tAA:BB:CC:DD:EE:01\tTest Wi-Fi\t74\tWPA2\t6\twlan0\n'
+		;;
+	both)
+		printf 'network-device\twlan0\twifi\tconnected\tTest Wi-Fi\n'
+		printf 'network-device\tenp2s0\tethernet\tconnected\tWired connection 1\n'
+		printf 'wifi-network\t*\tAA:BB:CC:DD:EE:01\tTest Wi-Fi\t74\tWPA2\t6\twlan0\n'
+		;;
+	*)
+		printf 'network-device\tenp2s0\tethernet\tdisconnected\t-\n'
+		printf 'network-device\twlan0\twifi\tdisconnected\t-\n'
+		;;
 	esac
-	;;
-devices | connections | wifi-scan)
-	:
+}
+
+case "${1:-}" in
+snapshot)
+	shift
+	snapshot "$@"
 	;;
 monitor)
 	: >"$test_dir/monitor-ready"
 	while IFS= read -r event; do printf '%s\n' "$event"; done <"$test_dir/monitor"
 	;;
-editor)
-	exit 127
-	;;
-*)
-	exit 2
-	;;
+editor) exit 127 ;;
+*) exit 2 ;;
 esac
 SH
 chmod +x "$data_home/dwm-titus/scripts/dwm-quickshell-network"
+printf '%s\n' 0 >"$network_test_dir/snapshot-count"
+: >"$network_test_dir/snapshot-args"
 
-Xvfb -displayfd 3 -screen 0 640x480x24 -nolisten tcp -extension GLX \
-	3>"$work/display-number" >"$work/xvfb.log" 2>&1 &
-xvfb_pid=$!
-index=0
-while [ "$index" -lt 100 ] && [ ! -s "$work/display-number" ]; do
-	if ! kill -0 "$xvfb_pid" 2>/dev/null; then
-		cat "$work/xvfb.log" >&2
-		exit 1
-	fi
-	index=$((index + 1))
-	sleep 0.05
-done
-[ -s "$work/display-number" ]
-display=":$(cat "$work/display-number")"
-kill -0 "$xvfb_pid"
-
-env DISPLAY="$display" HOME="$home" XDG_CONFIG_HOME="$config_home" \
+env QT_QPA_PLATFORM=offscreen HOME="$home" XDG_CONFIG_HOME="$config_home" \
 	XDG_DATA_HOME="$data_home" XDG_RUNTIME_DIR="$runtime" \
 	DWM_TEST_NETWORK_DIR="$network_test_dir" \
 	PATH="$data_home/dwm-titus/scripts:$PATH" \
@@ -127,48 +121,139 @@ env DISPLAY="$display" HOME="$home" XDG_CONFIG_HOME="$config_home" \
 quickshell_pid=$!
 
 config=$config_home/quickshell/shell.qml
-index=0
-while [ "$index" -lt 200 ]; do
-	initial_state=$(DISPLAY=$display HOME=$home XDG_CONFIG_HOME=$config_home \
-		XDG_DATA_HOME=$data_home XDG_RUNTIME_DIR=$runtime \
-		quickshell ipc --path "$config" call network-refresh-test icon 2>/dev/null || true)
-	[ "$initial_state" = ethernet ] && [ -e "$network_test_dir/monitor-ready" ] && break
-	index=$((index + 1))
-	sleep 0.05
-done
-if [ "${initial_state:-}" != ethernet ] || [ ! -e "$network_test_dir/monitor-ready" ]; then
+network_state() {
+	QT_QPA_PLATFORM=offscreen HOME="$home" XDG_CONFIG_HOME="$config_home" \
+		XDG_DATA_HOME="$data_home" XDG_RUNTIME_DIR="$runtime" \
+		quickshell ipc --path "$config" call network-snapshot-test state 2>/dev/null || true
+}
+network_ipc() {
+	QT_QPA_PLATFORM=offscreen HOME="$home" XDG_CONFIG_HOME="$config_home" \
+		XDG_DATA_HOME="$data_home" XDG_RUNTIME_DIR="$runtime" \
+		quickshell ipc --path "$config" call network-snapshot-test "$@"
+}
+wait_for_file() {
+	path=$1
+	index=0
+	while [ "$index" -lt 100 ] && [ ! -e "$path" ]; do
+		index=$((index + 1))
+		sleep 0.05
+	done
+	if [ ! -e "$path" ]; then
+		printf 'timed out waiting for %s\n' "$path" >&2
+		return 1
+	fi
+}
+wait_snapshot_count() {
+	want=$1
+	index=0
+	while [ "$index" -lt 100 ]; do
+		[ "$(cat "$network_test_dir/snapshot-count")" -ge "$want" ] && return 0
+		index=$((index + 1))
+		sleep 0.05
+	done
+	printf 'snapshot count: got %s, want at least %s\n' "$(cat "$network_test_dir/snapshot-count")" "$want" >&2
+	return 1
+}
+assert_origin() {
+	want=$1
+	actual=$(network_ipc origin)
+	if [ "$actual" != "$want" ]; then
+		printf 'snapshot origin: got %s, want %s\n' "$actual" "$want" >&2
+		return 1
+	fi
+}
+assert_no_rescan_yes() {
+	if grep -Fqx -- '--rescan yes' "$network_test_dir/snapshot-args"; then
+		printf 'cancelled settings rescan reached a shared snapshot\n' >&2
+		return 1
+	fi
+}
+wait_state() {
+	want=$1
+	index=0
+	while [ "$index" -lt 100 ]; do
+		actual=$(network_state)
+		[ "$actual" = "$want" ] && return 0
+		index=$((index + 1))
+		sleep 0.05
+	done
+	printf 'NetworkModel state: got %s, want %s\n' "${actual:-<empty>}" "$want" >&2
 	tail -60 "$work/quickshell.log" >&2
-	exit 1
-fi
+	return 1
+}
+refresh_for_state() {
+	printf '%s\n' "$1" >"$network_test_dir/state"
+	network_ipc refresh false shared >/dev/null
+	wait_state "$2"
+}
 
-baseline_status_count=$(cat "$network_test_dir/status-count")
-: >"$network_test_dir/block-next"
-DISPLAY=$display HOME=$home XDG_CONFIG_HOME=$config_home XDG_DATA_HOME=$data_home \
-	XDG_RUNTIME_DIR=$runtime quickshell ipc --path "$config" \
-	call network-refresh-test refresh >/dev/null
-index=0
-while [ "$index" -lt 100 ] && [ ! -e "$network_test_dir/status-blocked" ]; do
-	index=$((index + 1))
-	sleep 0.05
-done
-[ -e "$network_test_dir/status-blocked" ]
+wait_state "$(printf 'ethernet\t-1')"
+[ -e "$network_test_dir/monitor-ready" ]
+refresh_for_state wifi "$(printf 'wifi\t74')"
+refresh_for_state disconnected "$(printf 'disconnected\t-1')"
+refresh_for_state both "$(printf 'ethernet\t-1')"
+
 printf '%s\n' wifi >"$network_test_dir/state"
-printf 'changed-1\nchanged-2\nchanged-3\n' >"$network_test_dir/monitor"
-sleep 0.2
-: >"$network_test_dir/release"
+printf 'changed\n' >"$network_test_dir/monitor"
+wait_state "$(printf 'wifi\t74')"
 
-expected_status_count=$((baseline_status_count + 2))
-index=0
-while [ "$index" -lt 20 ]; do
-	trailing_state=$(DISPLAY=$display HOME=$home XDG_CONFIG_HOME=$config_home \
-		XDG_DATA_HOME=$data_home XDG_RUNTIME_DIR=$runtime \
-		quickshell ipc --path "$config" call network-refresh-test icon 2>/dev/null || true)
-	status_count=$(cat "$network_test_dir/status-count")
-	[ "$trailing_state" = wifi ] && [ "$status_count" -eq "$expected_status_count" ] && break
-	index=$((index + 1))
-	sleep 0.05
-done
-[ "${trailing_state:-}" = wifi ]
-[ "$(cat "$network_test_dir/status-count")" -eq "$expected_status_count" ]
+queued_start=$(cat "$network_test_dir/snapshot-count")
+printf '%s\n' panel >"$network_test_dir/block-next"
+network_ipc refresh false panel >/dev/null
+wait_for_file "$network_test_dir/snapshot-blocked-panel"
+printf '%s\n' settings >"$network_test_dir/block-next"
+network_ipc refresh true settings >/dev/null
+: >"$network_test_dir/release-panel"
+wait_for_file "$network_test_dir/snapshot-blocked-settings"
+[ "$(network_ipc origin)" = settings ]
+grep -Fqx -- '--rescan yes' "$network_test_dir/snapshot-args"
+: >"$network_test_dir/release-settings"
+wait_snapshot_count $((queued_start + 2))
 
-printf 'NetworkModel coalesced trailing refresh: PASS\n'
+cancel_start=$(cat "$network_test_dir/snapshot-count")
+printf '%s\n' cancel-panel >"$network_test_dir/block-next"
+network_ipc refresh false panel >/dev/null
+wait_for_file "$network_test_dir/snapshot-blocked-cancel-panel"
+network_ipc refresh true settings >/dev/null
+network_ipc closeSettings >/dev/null
+: >"$network_test_dir/release-cancel-panel"
+wait_snapshot_count $((cancel_start + 1))
+sleep 0.3
+[ "$(cat "$network_test_dir/snapshot-count")" -eq $((cancel_start + 1)) ]
+
+# A shared refresh queued before settings work must survive closing settings.
+: >"$network_test_dir/snapshot-args"
+shared_first_start=$(cat "$network_test_dir/snapshot-count")
+printf '%s\n' shared-first-panel >"$network_test_dir/block-next"
+network_ipc refresh false panel >/dev/null
+wait_for_file "$network_test_dir/snapshot-blocked-shared-first-panel"
+network_ipc refresh false shared >/dev/null
+printf '%s\n' shared-first-trailing >"$network_test_dir/block-next"
+network_ipc refresh true settings >/dev/null
+network_ipc closeSettings >/dev/null
+: >"$network_test_dir/release-shared-first-panel"
+wait_for_file "$network_test_dir/snapshot-blocked-shared-first-trailing"
+assert_origin shared
+assert_no_rescan_yes
+: >"$network_test_dir/release-shared-first-trailing"
+wait_snapshot_count $((shared_first_start + 2))
+
+# If settings queues a rescan first, closing it must discard that rescan while
+# preserving the later shared refresh.
+: >"$network_test_dir/snapshot-args"
+settings_first_start=$(cat "$network_test_dir/snapshot-count")
+printf '%s\n' settings-first-panel >"$network_test_dir/block-next"
+network_ipc refresh false panel >/dev/null
+wait_for_file "$network_test_dir/snapshot-blocked-settings-first-panel"
+network_ipc refresh true settings >/dev/null
+printf '%s\n' settings-first-trailing >"$network_test_dir/block-next"
+network_ipc refresh false shared >/dev/null
+network_ipc closeSettings >/dev/null
+: >"$network_test_dir/release-settings-first-panel"
+wait_for_file "$network_test_dir/snapshot-blocked-settings-first-trailing"
+assert_origin shared
+assert_no_rescan_yes
+: >"$network_test_dir/release-settings-first-trailing"
+wait_snapshot_count $((settings_first_start + 2))
+
+printf 'NetworkModel snapshot state contract: PASS\n'

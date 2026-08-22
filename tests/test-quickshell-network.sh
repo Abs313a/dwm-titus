@@ -206,19 +206,6 @@ DWM_TEST_NMCLI_MODE=offline \
 	"$repo/scripts/dwm-quickshell-network" status >"$work/offline.out"
 grep -Fqx "disconnected			-1" "$work/offline.out"
 
-network_model=$repo/config/quickshell/network/NetworkModel.qml
-grep -F 'property string connectionKind: "disconnected"' "$network_model" >/dev/null
-grep -F 'property int wifiSignal: -1' "$network_model" >/dev/null
-grep -F 'readonly property string barIconState: root.connectionKind' "$network_model" >/dev/null
-if ! grep -F 'Component.onCompleted: root.refresh(false)' "$network_model" >/dev/null; then
-	printf '%s\n' 'Network model must fetch initial state before the first nmcli monitor event.' >&2
-	exit 1
-fi
-if grep -F 'Timer {' "$network_model" >/dev/null; then
-	printf '%s\n' 'Network status refresh must remain event-driven without a polling timer.' >&2
-	exit 1
-fi
-
 PATH="$work/bin:$PATH" "$repo/scripts/dwm-quickshell-network" devices >"$work/devices.out"
 grep -Fqx "enp6s0	ethernet	connected	Wired connection 1" "$work/devices.out"
 if grep -Fq "loopback" "$work/devices.out"; then
