@@ -558,7 +558,7 @@ Flickable {
         }
 
         StatusCard {
-            visible: !root.appearanceModel.mutationReady
+            visible: root.appearanceModel.mutationRestricted && !root.appearanceBusy
             label: "Theme changes are read-only"
             statusState: "restricted"
             value: "Protected"

@@ -279,6 +279,7 @@ ShellRoot {
                 networkModel.refresh();
                 bluetoothModel.refresh();
                 controlsModel.refresh();
+                settingsModel.warmup();
             }
         }
     }

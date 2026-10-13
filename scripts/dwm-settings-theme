@@ -169,6 +169,10 @@ theme_source_structure_is_mutable() {
 	local source=$managed_themes_file line trimmed header section=other
 	local active_sections=0 active_keys=0
 	[[ ! -f $themes_file ]] || source=$themes_file
+	local parser=${DWM_THEME_PARSER:-$script_dir/dwm-theme-parser}
+	if [[ -x $parser ]]; then
+		"$parser" validate-structure "$source" 2>/dev/null && return 0 || return 1
+	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		trimmed=$line
 		trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
@@ -214,7 +218,57 @@ directory_path_ready() {
 	[[ -d $probe && ! -L $probe && -w $probe && -x $probe ]]
 }
 
+mutation_ready_stamp() {
+	local stamp=""
+	if [[ -e $themes_file ]]; then
+		stamp+="user:$(stat -c '%Y:%s' "$themes_file" 2>/dev/null || true);"
+	else
+		stamp+="user:none;"
+	fi
+	if [[ -e $managed_themes_file ]]; then
+		stamp+="managed:$(stat -c '%Y:%s' "$managed_themes_file" 2>/dev/null || true);"
+	else
+		stamp+="managed:none;"
+	fi
+	if [[ -e $recovery_dir ]]; then
+		stamp+="recovery:$(stat -c '%Y:%s' "$recovery_dir" 2>/dev/null || true);"
+	fi
+	printf '%s\n' "$stamp"
+}
+
+mutation_ready_from_cache() {
+	local cache_file=$runtime_dir/mutation-ready.cache stamp expected
+	[[ ${DWM_SETTINGS_NO_CACHE:-0} != 1 ]] || return 1
+	[[ -d $runtime_dir && -w $runtime_dir ]] || return 1
+	[[ -f $cache_file && ! -L $cache_file && $(stat -c %u -- "$cache_file" 2>/dev/null) == "$UID" ]] || return 1
+	expected=$(mutation_ready_stamp) || return 1
+	[[ -n $expected ]] || return 1
+	IFS= read -r stamp <"$cache_file" 2>/dev/null || return 1
+	[[ $stamp == "$expected" ]]
+}
+
+save_mutation_ready_cache() {
+	local cache_file=$runtime_dir/mutation-ready.cache stamp tmp_file
+	[[ ${DWM_SETTINGS_NO_CACHE:-0} != 1 ]] || return 0
+	[[ -d $runtime_dir && -w $runtime_dir ]] || return 0
+	stamp=$(mutation_ready_stamp) || return 0
+	[[ -n $stamp ]] || return 0
+	tmp_file=$cache_file.tmp.$$
+	if printf '%s\n' "$stamp" >"$tmp_file" 2>/dev/null; then
+		chmod 600 "$tmp_file" 2>/dev/null || true
+		mv -f "$tmp_file" "$cache_file" 2>/dev/null || rm -f "$tmp_file" 2>/dev/null || true
+	fi
+}
+
+invalidate_mutation_ready_cache() {
+	rm -f "$runtime_dir/mutation-ready.cache" 2>/dev/null || true
+}
+
 mutation_ready() {
+	local force=${1:-0}
+	if ((force == 0)) && mutation_ready_from_cache; then
+		return 0
+	fi
 	local parent probe snapshot managed_snapshot target path mode
 	[[ -x $appearance_helper && -x $apply_helper ]] || return 1
 	directory_path_ready "$runtime_base" true || return 1
@@ -271,7 +325,9 @@ mutation_ready() {
 	if snapshot_has_theme "$snapshot" "$target"; then
 		snapshot_target_is_valid "$snapshot" "$target" || return 1
 	fi
-	(validate_atomic_mv_support) >/dev/null 2>&1
+	(validate_atomic_mv_support) >/dev/null 2>&1 || return 1
+	save_mutation_ready_cache
+	return 0
 }
 
 personalization_ready() {
@@ -374,6 +430,11 @@ acquire_lock() {
 	flock 9
 }
 
+release_lock() {
+	flock -u 9 2>/dev/null || true
+	exec 9>&- 2>/dev/null || true
+}
+
 acquire_integration_lock() {
 	local lock_file=$runtime_base/dwm-theme-apply.lock
 	command -v flock >/dev/null 2>&1 || die 'flock is unavailable'
@@ -417,12 +478,28 @@ preview_path() {
 }
 
 snapshot_for() {
-	local source=$1 managed=$2 status=0
+	local source=$1 managed=$2 status=0 cache_file='' source_hash=''
+	if [[ -d $runtime_dir && -w $runtime_dir ]]; then
+		source_hash=$(sha256sum "$source" 2>/dev/null | awk '{print $1}' || true)
+		if [[ -n $source_hash ]]; then
+			cache_file=$runtime_dir/snapshot.$source_hash.cache
+			if [[ -f $cache_file && ! -L $cache_file && $(stat -c %u -- "$cache_file" 2>/dev/null) == "$UID" ]]; then
+				cat "$cache_file"
+				return 0
+			fi
+		fi
+	fi
 	[[ -x $appearance_helper ]] || die "appearance provider is unavailable: $appearance_helper"
-	DWM_APPEARANCE_THEMES_FILE=$source \
+	local result
+	result=$(DWM_APPEARANCE_THEMES_FILE=$source \
 		DWM_APPEARANCE_MANAGED_THEMES_FILE=$managed \
-		"$appearance_helper" snapshot || status=$?
+		"$appearance_helper" snapshot) || status=$?
 	((status == 0)) || die "appearance provider rejected the theme source with status $status"
+	if [[ -n $cache_file && -d $runtime_dir ]]; then
+		printf '%s\n' "$result" >"$cache_file" 2>/dev/null || true
+		chmod 600 -- "$cache_file" 2>/dev/null || true
+	fi
+	printf '%s\n' "$result"
 }
 
 current_snapshot() {
@@ -575,7 +652,9 @@ append_managed_theme() {
 }
 
 file_hash() {
-	sha256sum -- "$1" | awk '{print $1}'
+	local output
+	output=$(sha256sum -- "$1") || return 1
+	printf '%s' "${output%% *}"
 }
 
 integration_path_list() {
@@ -1054,7 +1133,9 @@ integration_meta_value() {
 }
 
 path_hash() {
-	printf '%s' "$1" | sha256sum | awk '{print $1}'
+	local output
+	output=$(printf '%s' "$1" | sha256sum) || return 1
+	printf '%s' "${output%% *}"
 }
 
 validate_integration_file() {
@@ -1351,6 +1432,8 @@ validate_atomic_mv_support() {
 	[[ -d $probe && ! -L $probe ]] || die "unsafe theme path: $themes_file"
 	probe_atomic_exchange "$probe" || die "theme filesystem does not support atomic exchange: $probe"
 	integration_path_list
+	local -A probed_dirs=()
+	probed_dirs[$probe]=1
 	for path in "${integration_paths[@]}"; do
 		probe=${path%/*}
 		while [[ ! -e $probe && ! -L $probe ]]; do
@@ -1362,8 +1445,11 @@ validate_atomic_mv_support() {
 		if [[ -e $path ]] && [[ $(stat -c %d -- "$path") != $(stat -c %d -- "$probe") ]]; then
 			die "integration file is on a different filesystem from its parent: $path"
 		fi
-		probe_atomic_exchange "$probe" ||
-			die "integration filesystem does not support atomic exchange: $probe"
+		if [[ -z ${probed_dirs[$probe]+x} ]]; then
+			probe_atomic_exchange "$probe" ||
+				die "integration filesystem does not support atomic exchange: $probe"
+			probed_dirs[$probe]=1
+		fi
 	done
 }
 
@@ -1498,11 +1584,13 @@ prepare_integration_outputs() (
 			chmod "$mode" -- "${staged_paths[index]}" || return 1
 		fi
 	done
-	for index in alacritty kitty; do
-		if [[ -d $config_home/$index && ! -L $config_home/$index ]]; then
-			mkdir -p -- "$stage_config_home/$index"
-		fi
-	done
+	if [[ -z $personalization_capability ]]; then
+		for index in alacritty kitty; do
+			if [[ -d $config_home/$index && ! -L $config_home/$index ]]; then
+				mkdir -p -- "$stage_config_home/$index"
+			fi
+		done
+	fi
 	stage_personalization_config "$stage_config_home/dwm-titus/personalization.conf" || return 1
 	if [[ $personalization_repair == 0 ]]; then
 		run_theme_apply_for transactional "$stage_home" "$stage_config_home" 1 || return 1
@@ -1675,8 +1763,15 @@ write_integration_transaction() {
 	mv -f -- "$temporary" "$integration_transaction_file"
 }
 
+clear_snapshot_cache() {
+	if [[ -d $runtime_dir ]]; then
+		rm -f -- "$runtime_dir"/snapshot.*.cache 2>/dev/null || true
+	fi
+}
+
 clear_integration_transaction() {
 	rm -f -- "$integration_transaction_file"
+	clear_snapshot_cache
 }
 
 clear_integration_suppression() {
@@ -2013,7 +2108,7 @@ begin_mutation() {
 	elif ((publish_status != 0)); then
 		die 'could not publish theme integration outputs'
 	fi
-	if [[ $personalization_repair == 0 ]]; then
+	if [[ $personalization_repair == 0 && -z $personalization_capability ]]; then
 		reload_kitty_after_integration_publish
 	fi
 	append_metadata "$prefix" integrations_ready 1
@@ -2037,6 +2132,7 @@ finish_mutation() {
 		done
 	fi
 	cleanup_prefix "$prefix"
+	release_lock
 }
 
 ensure_no_preview() {
@@ -2562,8 +2658,13 @@ recovery-status)
 	recovery_status
 	;;
 mutation-ready)
-	[[ $# == 1 ]] || die 'mutation-ready takes no arguments'
-	mutation_ready
+	if [[ $# == 1 ]]; then
+		mutation_ready
+	elif [[ $# == 2 && ($2 == --force || $2 == --refresh) ]]; then
+		mutation_ready 1
+	else
+		die 'usage: dwm-settings-theme mutation-ready [--force]'
+	fi
 	;;
 personalization-ready)
 	[[ $# == 1 ]] || die 'personalization-ready takes no arguments'

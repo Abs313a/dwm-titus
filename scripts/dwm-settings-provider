@@ -235,9 +235,11 @@ appearance_mutation_ready() {
 	if [ "$command_path" = "$script_dir/dwm-settings-theme" ] &&
 		[ -f "$script_dir/../config/themes.toml" ]; then
 		DWM_APPEARANCE_MANAGED_THEMES_FILE=$script_dir/../config/themes.toml \
-			"$timeout_path" 2 "$command_path" mutation-ready >/dev/null 2>&1
+			"$timeout_path" --signal=TERM --kill-after=1 5 \
+			"$command_path" mutation-ready >/dev/null 2>&1
 	else
-		"$timeout_path" 2 "$command_path" mutation-ready >/dev/null 2>&1
+		"$timeout_path" --signal=TERM --kill-after=1 5 \
+			"$command_path" mutation-ready >/dev/null 2>&1
 	fi
 }
 
@@ -595,24 +597,7 @@ trusted_display_helper() {
 	return 1
 }
 
-discover() {
-	os_release=${DWM_SETTINGS_OS_RELEASE:-/etc/os-release}
-	platform_id=unknown
-	platform_pretty='Unknown Linux'
-	if [ -r "$os_release" ]; then
-		platform_id=$(os_value ID "$os_release")
-		platform_pretty=$(os_value PRETTY_NAME "$os_release")
-		[ -n "$platform_id" ] || platform_id=unknown
-		[ -n "$platform_pretty" ] || platform_pretty=$platform_id
-	fi
-	platform_family_name=$(platform_family "$platform_id")
-
-	printf 'settings-protocol\t1\n'
-	printf 'platform\t%s\t%s\t%s\n' \
-		"$(clean_field "$platform_id")" \
-		"$(clean_field "$platform_family_name")" \
-		"$(clean_field "$platform_pretty")"
-
+emit_displays_capabilities() {
 	emit_probed_command_capability displays randr 'Display discovery' read-only xrandr \
 		'RandR display state is available' \
 		'Install the X11 RandR tools and open Settings from X11' \
@@ -632,7 +617,9 @@ discover() {
 		emit_capability displays display-persistence 'Persistent display profiles' restricted privileged \
 			dwm-settings-display-root 'Live previews remain available; install the trusted root helper for persistence'
 	fi
+}
 
+emit_input_capabilities() {
 	if ! provider_available dwm-settings-input || ! provider_available xinput; then
 		input_discovery_state=missing
 	elif input_snapshot_valid; then
@@ -650,18 +637,35 @@ discover() {
 		emit_capability input input-devices 'Input devices' unavailable user-session \
 			dwm-settings-input 'Install xinput and the managed input Settings provider'
 	fi
+}
 
+emit_network_capabilities() {
 	emit_probed_command_capability network networkmanager NetworkManager delegated nmcli \
 		'NetworkManager state is available' \
 		'Install NetworkManager to enable this section' \
 		'NetworkManager is installed, but its service is not responding' \
 		-t -f RUNNING general
-	emit_probed_command_capability bluetooth bluez Bluetooth delegated bluetoothctl \
-		'BlueZ state is available' \
-		'Install BlueZ tools to enable this section' \
-		'BlueZ tools are installed, but no daemon or adapter is responding' \
-		show
+}
 
+emit_bluetooth_capabilities() {
+	if provider_available bluetoothctl; then
+		if provider_available busctl && ! run_bounded_probe busctl --system status org.bluez; then
+			emit_capability bluetooth bluez Bluetooth unavailable delegated bluetoothctl \
+				'BlueZ tools are installed, but no daemon or adapter is responding'
+		elif run_bounded_probe bluetoothctl show; then
+			emit_capability bluetooth bluez Bluetooth available delegated bluetoothctl \
+				'BlueZ state is available'
+		else
+			emit_capability bluetooth bluez Bluetooth unavailable delegated bluetoothctl \
+				'BlueZ tools are installed, but no daemon or adapter is responding'
+		fi
+	else
+		emit_capability bluetooth bluez Bluetooth unavailable delegated bluetoothctl \
+			'Install BlueZ tools to enable this section'
+	fi
+}
+
+emit_audio_capabilities() {
 	if run_bounded_probe pactl info; then
 		emit_capability audio pipewire-audio Audio available user-session pactl \
 			'PipeWire Pulse-compatible session controls are available'
@@ -675,7 +679,9 @@ discover() {
 		emit_capability audio pipewire-audio Audio unavailable user-session pipewire \
 			'Start PipeWire and install pactl or wpctl'
 	fi
+}
 
+emit_power_capabilities() {
 	emit_probed_command_capability power dpms 'Display power management' user-session xset \
 		'X11 DPMS state is available' \
 		'Install xset and open Settings from X11' \
@@ -689,7 +695,9 @@ discover() {
 		emit_capability power auto-lock 'Automatic locking' partial user-session light-locker \
 			'Install xset, GLib settings, and light-locker for full support'
 	fi
+}
 
+emit_defaults_capabilities() {
 	if run_bounded_probe xdg-settings get default-web-browser &&
 		run_bounded_probe xdg-mime query default text/html; then
 		emit_capability defaults xdg-defaults 'Default applications' available user-session xdg-utils \
@@ -711,7 +719,9 @@ discover() {
 		emit_capability defaults xdg-autostart 'Startup applications' partial user-session xdg-autostart \
 			'Autostart entries are readable; install inotify-tools for live updates'
 	fi
+}
 
+emit_appearance_theme_capabilities() {
 	if ! provider_available dwm-settings-appearance; then
 		emit_capability appearance themes Themes unavailable read-only dwm-settings-appearance \
 			'Install the managed appearance provider'
@@ -730,8 +740,14 @@ discover() {
 		emit_capability appearance themes Themes unavailable read-only dwm-settings-appearance \
 			'Restore a valid themes.toml configuration or inspect the appearance snapshot errors'
 	fi
-	emit_accessibility_capabilities
+}
 
+emit_appearance_capabilities() {
+	emit_appearance_theme_capabilities
+	emit_accessibility_capabilities
+}
+
+emit_system_capabilities() {
 	if provider_available dwm-system-health; then
 		emit_capability system health 'System health' available read-only dwm-system-health \
 			'Unprivileged health state is available'
@@ -753,13 +769,135 @@ discover() {
 		'High-risk administration remains delegated to trusted tools'
 }
 
+discover_sequential() {
+	emit_displays_capabilities
+	emit_input_capabilities
+	emit_network_capabilities
+	emit_bluetooth_capabilities
+	emit_audio_capabilities
+	emit_power_capabilities
+	emit_defaults_capabilities
+	emit_appearance_capabilities
+	emit_system_capabilities
+}
+
+discover_parallel() {
+	probe_tmp=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+	probe_dir=$(mktemp -d "$probe_tmp/dwm-provider-discover.XXXXXX" 2>/dev/null || mktemp -d)
+	trap 'rm -rf "$probe_dir"' EXIT HUP INT TERM
+
+	# Determine input state first (0.03s) so appearance inherits input_discovery_state and input_snapshot
+	emit_input_capabilities >"$probe_dir/02-input"
+
+	emit_displays_capabilities >"$probe_dir/01-displays" &
+	emit_network_capabilities >"$probe_dir/03-network" &
+	emit_bluetooth_capabilities >"$probe_dir/04-bluetooth" &
+	emit_audio_capabilities >"$probe_dir/05-audio" &
+	emit_power_capabilities >"$probe_dir/06-power" &
+	emit_defaults_capabilities >"$probe_dir/07-defaults" &
+	(
+		emit_appearance_theme_capabilities >"$probe_dir/08a-themes" &
+		emit_accessibility_capabilities >"$probe_dir/08b-access" &
+		wait
+		cat "$probe_dir/08a-themes" "$probe_dir/08b-access"
+	) >"$probe_dir/08-appearance" &
+	emit_system_capabilities >"$probe_dir/09-system" &
+
+	wait
+	cat "$probe_dir"/01-displays "$probe_dir"/02-input "$probe_dir"/03-network \
+		"$probe_dir"/04-bluetooth "$probe_dir"/05-audio "$probe_dir"/06-power \
+		"$probe_dir"/07-defaults "$probe_dir"/08-appearance "$probe_dir"/09-system
+	rm -rf "$probe_dir"
+	trap - EXIT HUP INT TERM
+}
+
+emit_cached_file() {
+	if command -v cat >/dev/null 2>&1; then
+		cat "$1"
+	else
+		while IFS= read -r line || [ -n "$line" ]; do
+			printf '%s\n' "$line"
+		done <"$1"
+	fi
+}
+
+discover() {
+	force=${1:-0}
+	runtime_dir=${XDG_RUNTIME_DIR:-}
+	cache_file=
+	cache_dir=
+	if [ -n "$runtime_dir" ] && [ -d "$runtime_dir" ] && [ "${DWM_SETTINGS_NO_CACHE:-0}" != 1 ] &&
+		command -v mv >/dev/null 2>&1; then
+		cache_dir=$runtime_dir/dwm-titus
+		cache_file=$cache_dir/capabilities.cache
+		if [ "$force" -eq 0 ] && [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
+			emit_cached_file "$cache_file"
+			return 0
+		fi
+	fi
+
+	os_release=${DWM_SETTINGS_OS_RELEASE:-/etc/os-release}
+	platform_id=unknown
+	platform_pretty='Unknown Linux'
+	if [ -r "$os_release" ]; then
+		platform_id=$(os_value ID "$os_release")
+		platform_pretty=$(os_value PRETTY_NAME "$os_release")
+		[ -n "$platform_id" ] || platform_id=unknown
+		[ -n "$platform_pretty" ] || platform_pretty=$platform_id
+	fi
+	platform_family_name=$(platform_family "$platform_id")
+
+	if [ -n "$cache_file" ] && mkdir -p "$cache_dir" 2>/dev/null && [ -w "$cache_dir" ]; then
+		cache_tmp=$cache_file.tmp.$$
+		if (
+			printf 'settings-protocol\t1\n'
+			printf 'platform\t%s\t%s\t%s\n' \
+				"$(clean_field "$platform_id")" \
+				"$(clean_field "$platform_family_name")" \
+				"$(clean_field "$platform_pretty")"
+			if command -v mktemp >/dev/null 2>&1 && command -v cat >/dev/null 2>&1; then
+				discover_parallel
+			else
+				discover_sequential
+			fi
+		) >"$cache_tmp" 2>/dev/null; then
+			command -v chmod >/dev/null 2>&1 && chmod 600 "$cache_tmp" 2>/dev/null || true
+			if mv -f "$cache_tmp" "$cache_file" 2>/dev/null && [ -r "$cache_file" ]; then
+				emit_cached_file "$cache_file"
+				return 0
+			fi
+			emit_cached_file "$cache_tmp"
+			rm -f "$cache_tmp" 2>/dev/null || true
+			return 0
+		fi
+		rm -f "$cache_tmp" 2>/dev/null || true
+	fi
+
+	printf 'settings-protocol\t1\n'
+	printf 'platform\t%s\t%s\t%s\n' \
+		"$(clean_field "$platform_id")" \
+		"$(clean_field "$platform_family_name")" \
+		"$(clean_field "$platform_pretty")"
+
+	if command -v mktemp >/dev/null 2>&1 && command -v cat >/dev/null 2>&1; then
+		discover_parallel
+	else
+		discover_sequential
+	fi
+}
+
 case ${1:-} in
 discover)
-	[ "$#" -eq 1 ] || {
-		usage
-		exit 2
-	}
-	discover
+	shift
+	force=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--force | --refresh | force | refresh) force=1 ;;
+		*) usage; exit 2 ;;
+		esac
+		shift
+	done
+	discover "$force"
 	;;
 watch-notifications)
 	[ "$#" -eq 1 ] || {

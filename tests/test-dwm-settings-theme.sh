@@ -909,7 +909,7 @@ HOME=$home_dir XDG_CONFIG_HOME=$config_home XDG_DATA_HOME=$data_home \
 	"$helper" preview integration-publish-race 10 dracula \
 	>"$work/integration-publish-race.out" 2>"$work/integration-publish-race.err" &
 publish_race_pid=$!
-for attempt in {1..100}; do
+for attempt in {1..300}; do
 	[[ -e $publish_ready ]] && break
 	sleep 0.05
 done

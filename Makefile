@@ -84,6 +84,7 @@ INSTALL_COMMANDS = \
 	scripts/protonrestart \
 	scripts/theme-apply.sh \
 	scripts/dwm-cursor-reload \
+	scripts/dwm-theme-parser \
 	scripts/webapp-create \
 	scripts/webapp-launch \
 	scripts/xdg-enable-autostart.sh \
@@ -249,6 +250,15 @@ install-cursors:
 		"${DESTDIR}${DATADIR}/icons/${CAPITAINE_LIGHT_THEME}" -type d -exec chmod 755 {} +
 	find "${DESTDIR}${DATADIR}/icons/${CAPITAINE_DARK_THEME}" \
 		"${DESTDIR}${DATADIR}/icons/${CAPITAINE_LIGHT_THEME}" -type f -exec chmod 644 {} +
+	if [ -d "${DESTDIR}/usr/share/icons" ] && [ "$$(realpath -m "${DESTDIR}${DATADIR}")" != "$$(realpath -m "${DESTDIR}/usr/share")" ]; then \
+		rm -rf "${DESTDIR}/usr/share/icons/${CAPITAINE_DARK_THEME}" "${DESTDIR}/usr/share/icons/${CAPITAINE_LIGHT_THEME}"; \
+		cp -a --no-preserve=ownership "assets/cursors/${CAPITAINE_DARK_THEME}" "${DESTDIR}/usr/share/icons/"; \
+		cp -a --no-preserve=ownership "assets/cursors/${CAPITAINE_LIGHT_THEME}" "${DESTDIR}/usr/share/icons/"; \
+		find "${DESTDIR}/usr/share/icons/${CAPITAINE_DARK_THEME}" \
+			"${DESTDIR}/usr/share/icons/${CAPITAINE_LIGHT_THEME}" -type d -exec chmod 755 {} +; \
+		find "${DESTDIR}/usr/share/icons/${CAPITAINE_DARK_THEME}" \
+			"${DESTDIR}/usr/share/icons/${CAPITAINE_LIGHT_THEME}" -type f -exec chmod 644 {} +; \
+	fi
 	install -Dm644 assets/cursors/COPYING \
 		"${DESTDIR}${CAPITAINE_LICENSE_DIR}/COPYING"
 
@@ -285,6 +295,10 @@ install-user-files:
 		mkdir -p "$$dst"; \
 		cp -aL -n --no-preserve=ownership "$$dir"/. "$$dst"/; \
 	done
+	@echo "==> Seeding user cursor themes..."
+	mkdir -p "${XDG_DATA_HOME}/icons"
+	test -d "${XDG_DATA_HOME}/icons/${CAPITAINE_DARK_THEME}" || cp -a --no-preserve=ownership "assets/cursors/${CAPITAINE_DARK_THEME}" "${XDG_DATA_HOME}/icons/"
+	test -d "${XDG_DATA_HOME}/icons/${CAPITAINE_LIGHT_THEME}" || cp -a --no-preserve=ownership "assets/cursors/${CAPITAINE_LIGHT_THEME}" "${XDG_DATA_HOME}/icons/"
 	@echo "==> Seeding dwm-scoped XDG autostart overrides..."
 	HOME="${USER_HOME}" XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
 		XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS}" \
@@ -580,10 +594,17 @@ check-quickshell-system-management: all
 
 check-settings:
 	tests/test-settings.sh
+	tests/test-settings-provider-cache.sh
+	tests/test-settings-provider-perf.sh
+	tests/test-quickshell-settings-navigation.sh
 	tests/test-settings-input.sh
 	python3 tests/test-display-profiles.py
 
 check-appearance:
+	python3 tests/test-dwm-theme-parser.py
+	tests/test-personalization-fastpath.sh
+	tests/test-settings-theme-mutation-ready-cache.sh
+	tests/test-quickshell-appearance-mutation-state.sh
 	tests/test-dwm-settings-appearance.sh
 	tests/test-dwm-settings-appearance-inventory.sh
 	tests/test-dwm-settings-font.sh

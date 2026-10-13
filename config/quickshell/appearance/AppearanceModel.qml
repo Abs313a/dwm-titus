@@ -18,6 +18,7 @@ Scope {
         || root.fontStatusPending || picomModel.statusBusy
     property bool busy: false
     property bool mutationReady: false
+    property bool mutationRestricted: false
     property bool mutationReadinessPending: false
     property string providerState: "idle"
     property string providerDetail: "Appearance has not been loaded"
@@ -1855,7 +1856,10 @@ Scope {
         running: false
         stdout: StdioCollector {
             onStreamFinished: root.mutationReady = !root.mutationReadinessPending
-                && this.text.trim() === "available"
+                && (function(txt) {
+                    root.mutationRestricted = !root.mutationReadinessPending && txt === "restricted";
+                    return txt === "available";
+                })(this.text.trim())
         }
         onRunningChanged: {
             if (!running && root.mutationReadinessPending && !actionProcess.running) {

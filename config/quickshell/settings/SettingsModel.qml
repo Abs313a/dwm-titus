@@ -756,11 +756,21 @@ Scope {
             root.panelSettingsModel.refresh();
         if (root.visible && root.selectedSectionId === "system" && root.systemManagementModel)
             root.systemManagementModel.refresh();
-        root.refreshCapabilities();
+        root.refreshCapabilities(true);
+    }
+
+    function warmup() {
+        if (root.discoveryState === "idle" && !providerProcess.running) {
+            providerProcess.command = Commands.settingsProviderCommand("discover", []);
+            providerProcess.running = true;
+        }
     }
 
     function refreshCapabilities() {
         if (!root.visible) return;
+        const force = arguments.length > 0 && arguments[0] === true;
+        if (!force && root.discoveryState === "ready" && root.capabilities.length > 0)
+            return;
         if (providerProcess.running) {
             root.capabilityRefreshPending = true;
             return;
@@ -768,6 +778,9 @@ Scope {
         root.busy = true;
         root.discoveryState = "loading";
         root.message = "Discovering capabilities...";
+        providerProcess.command = force
+            ? Commands.settingsProviderCommand("discover", ["--force"])
+            : Commands.settingsProviderCommand("discover", []);
         providerProcess.running = true;
         root.capabilityRefreshPending = false;
     }

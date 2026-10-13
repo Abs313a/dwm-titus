@@ -1189,15 +1189,27 @@ inventory() {
 }
 
 add_inventory_watch_dir() {
-	local candidate=$1 resolved mode
+	local candidate=$1 resolved mode parent
 	inventory_watch_target_accepted=false
+	((${#inventory_watch_dirs[@]} < max_inventory_watch_dirs)) || return 0
 	inventory_field_safe "$candidate" || return 0
 	[[ -d $candidate ]] || return 0
-	resolved=$(readlink -f -- "$candidate" 2>/dev/null) || return 0
+	parent=${candidate%/*}
+	if [[ ! -L $candidate && -n ${inventory_watch_parent_cache[$parent]+x} ]]; then
+		resolved="${inventory_watch_parent_cache[$parent]}/${candidate##*/}"
+	elif [[ ! -L $candidate && $candidate == /* && $parent != *".."* && -d $parent && ! -L $parent ]]; then
+		resolved=$(readlink -f -- "$parent" 2>/dev/null) || return 0
+		inventory_watch_parent_cache[$parent]=$resolved
+		resolved="$resolved/${candidate##*/}"
+	else
+		resolved=$(readlink -f -- "$candidate" 2>/dev/null) || return 0
+	fi
 	inventory_field_safe "$resolved" || return 0
-	mode=$(stat -Lc %a -- "$resolved" 2>/dev/null) || return 0
-	[[ $mode =~ ^[0-7]{1,4}$ ]] || return 0
-	(((8#$mode & 0444) != 0 && (8#$mode & 0111) != 0)) || return 0
+	if (( EUID == 0 )); then
+		mode=$(stat -Lc %a -- "$resolved" 2>/dev/null) || return 0
+		[[ $mode =~ ^[0-7]{1,4}$ ]] || return 0
+		(((8#$mode & 0444) != 0 && (8#$mode & 0111) != 0)) || return 0
+	fi
 	[[ $resolved == /* && $resolved != / && -d $resolved && ! -L $resolved &&
 		-r $resolved && -x $resolved ]] || return 0
 	candidate=$resolved
@@ -1315,7 +1327,7 @@ watch_inventory() {
 	local ready_attempt=0 status=0 event inventory_watch_target_accepted=false
 	local -a inventory_watch_dirs=()
 	local -a inventory_icon_roots=() inventory_theme_roots=() inventory_font_roots=()
-	local -A inventory_watch_seen=()
+	local -A inventory_watch_seen=() inventory_watch_parent_cache=()
 	command -v inotifywait >/dev/null 2>&1 || {
 		printf 'dwm-settings-appearance: inotifywait is required for inventory watching\n' >&2
 		return 1

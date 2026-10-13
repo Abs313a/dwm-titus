@@ -404,7 +404,12 @@ persisted_protocol_unsupported() {
 }
 
 decode_theme_environment_value() {
-	local raw=$1 result='' character index
+	local raw=$1
+	if [[ $raw =~ ^[A-Za-z0-9._+@-]+$ ]]; then
+		decoded_theme_environment_value=$raw
+		return 0
+	fi
+	local result='' character index
 	for ((index = 0; index < ${#raw}; index++)); do
 		character=${raw:index:1}
 		if [[ $character == \\ ]]; then
