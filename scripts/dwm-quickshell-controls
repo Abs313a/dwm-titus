@@ -653,7 +653,14 @@ bluetooth_status() {
 		return 0
 	fi
 
-	powered=$(bluetoothctl show 2>/dev/null |
+	if command -v busctl >/dev/null 2>&1; then
+		busctl --system status org.bluez >/dev/null 2>&1 || {
+			printf '%s\n' "BT unavailable"
+			return 0
+		}
+	fi
+
+	powered=$(run_bounded 1 bluetoothctl show 2>/dev/null |
 		awk '
 			/^[[:space:]]*Powered:/ {
 				print $2
@@ -675,15 +682,18 @@ bluetooth_status() {
 		return 0
 	fi
 
-	count=$(bluetoothctl devices Connected 2>/dev/null | awk 'NF > 0 { count++ } END { print count + 0 }')
+	count=$(run_bounded 1 bluetoothctl devices Connected 2>/dev/null | awk 'NF > 0 { count++ } END { print count + 0 }')
 	printf 'BT %s\n' "$count"
 }
 
 bluetooth_devices() {
 	command -v bluetoothctl >/dev/null 2>&1 || return 0
-	bluetoothctl devices | while IFS=' ' read -r _ address name; do
+	if command -v busctl >/dev/null 2>&1; then
+		busctl --system status org.bluez >/dev/null 2>&1 || return 0
+	fi
+	run_bounded 1 bluetoothctl devices 2>/dev/null | while IFS=' ' read -r _ address name; do
 		[ -n "$address" ] || continue
-		info=$(bluetoothctl info "$address" 2>/dev/null || true)
+		info=$(run_bounded 1 bluetoothctl info "$address" 2>/dev/null || true)
 		paired=$(printf '%s\n' "$info" | awk '/Paired:/ { print $2; exit }')
 		connected=$(printf '%s\n' "$info" | awk '/Connected:/ { print $2; exit }')
 		printf '%s\t%s\t%s\t%s\n' "$address" "$name" "${paired:-no}" "${connected:-no}"

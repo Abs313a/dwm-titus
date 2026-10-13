@@ -24,6 +24,10 @@ grep -Fq 'if (fallbackWatchProcess.running) fallbackWatchProcess.running = false
 if grep -Fq 'repeat: true' "$model"; then
 	exit 1
 fi
+if grep -A 2 -F 'property bool initialLoading:' "$model" | grep -Eq '(bluetoothStatusProcess|mediaStatusProcess)'; then
+	printf 'ControlsModel.initialLoading must not be coupled to bluetooth or media processes\n' >&2
+	exit 1
+fi
 grep -Fq 'function parseAudioSnapshot(text)' "$model"
 grep -Fq 'fields[3] !== "yes" && fields[3] !== "no"' "$model"
 grep -Fq 'fields[4] !== "yes" && fields[4] !== "no"' "$model"

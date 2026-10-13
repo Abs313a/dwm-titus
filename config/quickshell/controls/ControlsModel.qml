@@ -8,7 +8,7 @@ Scope {
     id: root
 
     readonly property bool initialLoading: audioSnapshotProcess.running || volumeStatusProcess.running
-        || micStatusProcess.running || mediaStatusProcess.running || bluetoothStatusProcess.running
+        || micStatusProcess.running
 
     property bool visible: false
     property bool settingsVisible: false

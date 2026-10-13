@@ -142,6 +142,14 @@ cat >"$work/bin/bluetoothctl" <<'SH'
 #!/bin/sh
 set -eu
 
+if [ "${DWM_TEST_BLUEZ_MODE:-available}" = "unavailable" ]; then
+	printf 'bluetoothctl must not be invoked when bluez is unavailable\n' >&2
+	if [ -n "${DWM_TEST_BT_FAIL_FILE:-}" ]; then
+		echo "called" >"$DWM_TEST_BT_FAIL_FILE"
+	fi
+	exit 99
+fi
+
 case "$*" in
 show)
 	case "${DWM_TEST_BT_MODE:-on}" in
@@ -356,6 +364,20 @@ DWM_TEST_BT_MODE=none \
 	PATH="$work/bin:$PATH" \
 	"$repo/scripts/dwm-quickshell-controls" bluetooth-status >"$work/bluetooth-none.out"
 grep -Fqx "BT unavailable" "$work/bluetooth-none.out"
+
+DWM_TEST_BLUEZ_MODE=unavailable \
+	DWM_TEST_BT_FAIL_FILE="$work/bluetoothctl-fail" \
+	PATH="$work/bin:$PATH" \
+	"$repo/scripts/dwm-quickshell-controls" bluetooth-status >"$work/bluetooth-unavail.out"
+grep -Fqx "BT unavailable" "$work/bluetooth-unavail.out"
+
+DWM_TEST_BLUEZ_MODE=unavailable \
+	DWM_TEST_BT_FAIL_FILE="$work/bluetoothctl-fail" \
+	PATH="$work/bin:$PATH" \
+	"$repo/scripts/dwm-quickshell-controls" bluetooth-devices >"$work/bluetooth-devices-unavail.out"
+[ ! -s "$work/bluetooth-devices-unavail.out" ]
+[ ! -e "$work/bluetoothctl-fail" ]
+
 
 PATH="$work/bin:$PATH" "$repo/scripts/dwm-quickshell-controls" bluetooth-snapshot >"$work/bluetooth-snapshot.out"
 grep -Fqx "connectivity-protocol	1	0" "$work/bluetooth-snapshot.out"
