@@ -601,6 +601,7 @@ check-settings:
 	python3 tests/test-display-profiles.py
 
 check-appearance:
+	python3 -B tests/test-appearance-convergence.py
 	python3 tests/test-dwm-theme-parser.py
 	tests/test-personalization-fastpath.sh
 	tests/test-settings-theme-mutation-ready-cache.sh

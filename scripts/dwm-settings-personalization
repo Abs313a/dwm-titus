@@ -405,7 +405,7 @@ persisted_protocol_unsupported() {
 
 decode_theme_environment_value() {
 	local raw=$1
-	if [[ $raw =~ ^[A-Za-z0-9._+@-]+$ ]]; then
+	if [[ $raw =~ ^[A-Za-z0-9._+@/:-]+$ ]]; then
 		decoded_theme_environment_value=$raw
 		return 0
 	fi
@@ -416,7 +416,7 @@ decode_theme_environment_value() {
 			((index += 1))
 			((index < ${#raw})) || return 1
 			result+=${raw:index:1}
-		elif [[ $character =~ ^[A-Za-z0-9._+@-]$ ]]; then
+		elif [[ $character =~ ^[A-Za-z0-9._+@/:-]$ ]]; then
 			result+=$character
 		else
 			return 1
@@ -428,7 +428,9 @@ decode_theme_environment_value() {
 
 parse_theme_environment() {
 	local file=$config_home/dwm-titus/theme-env.sh line value
-	local seen_qt=false seen_cursor=false seen_size=false
+	local seen_qt=false seen_cursor=false seen_size=false seen_path=false
+	local cursor_path
+	local -a cursor_paths=()
 	[[ -r $file && -f $file && ! -L $file &&
 		$(stat -c %u -- "$file") == "$UID" &&
 		$(stat -c %h -- "$file") == 1 &&
@@ -462,6 +464,17 @@ parse_theme_environment() {
 			[[ $value != *[!0-9]* ]] || return 1
 			parsed_theme_cursor_size=$value
 			seen_size=true
+			;;
+		'export XCURSOR_PATH='*)
+			[[ $seen_path == false ]] || return 1
+			decode_theme_environment_value "${line#*=}" || return 1
+			value=$decoded_theme_environment_value
+			[[ -n $value && $value != *: && $value != *::* ]] || return 1
+			IFS=: read -r -a cursor_paths <<<"$value"
+			for cursor_path in "${cursor_paths[@]}"; do
+				[[ $cursor_path == /* && $cursor_path != *$'\n'* && $cursor_path != *$'\r'* ]] || return 1
+			done
+			seen_path=true
 			;;
 		*) return 1 ;;
 		esac

@@ -14,6 +14,7 @@ Scope {
     property string discoveryState: "idle"
     property string message: ""
     property bool capabilityRefreshPending: false
+    property bool capabilityRefreshForced: false
     property string platformId: "unknown"
     property string platformFamily: "unknown"
     property string platformName: "Unknown Linux"
@@ -768,13 +769,16 @@ Scope {
 
     function refreshCapabilities() {
         if (!root.visible) return;
-        const force = arguments.length > 0 && arguments[0] === true;
-        if (!force && root.discoveryState === "ready" && root.capabilities.length > 0)
-            return;
+        const force = (arguments.length > 0 && arguments[0] === true)
+            || root.capabilityRefreshForced;
         if (providerProcess.running) {
             root.capabilityRefreshPending = true;
+            root.capabilityRefreshForced = force;
             return;
         }
+        if (!force && !root.capabilityRefreshPending
+                && root.discoveryState === "ready" && root.capabilities.length > 0)
+            return;
         root.busy = true;
         root.discoveryState = "loading";
         root.message = "Discovering capabilities...";
@@ -783,6 +787,7 @@ Scope {
             : Commands.settingsProviderCommand("discover", []);
         providerProcess.running = true;
         root.capabilityRefreshPending = false;
+        root.capabilityRefreshForced = false;
     }
 
     function openWindow() {
@@ -820,8 +825,9 @@ Scope {
 				root.revertPreview();
 			}
 		}
-        providerProcess.running = false;
         root.capabilityRefreshPending = false;
+        root.capabilityRefreshForced = false;
+        providerProcess.running = false;
         root.displayRefreshPending = false;
         displayDiscoverProcess.running = false;
         automaticDisplayStatusProcess.running = false;

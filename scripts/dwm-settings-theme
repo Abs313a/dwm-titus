@@ -221,17 +221,17 @@ directory_path_ready() {
 mutation_ready_stamp() {
 	local stamp=""
 	if [[ -e $themes_file ]]; then
-		stamp+="user:$(stat -c '%Y:%s' "$themes_file" 2>/dev/null || true);"
+		stamp+="user:$(stat -c '%y:%z:%s:%i' "$themes_file" 2>/dev/null || true);"
 	else
 		stamp+="user:none;"
 	fi
 	if [[ -e $managed_themes_file ]]; then
-		stamp+="managed:$(stat -c '%Y:%s' "$managed_themes_file" 2>/dev/null || true);"
+		stamp+="managed:$(stat -c '%y:%z:%s:%i' "$managed_themes_file" 2>/dev/null || true);"
 	else
 		stamp+="managed:none;"
 	fi
 	if [[ -e $recovery_dir ]]; then
-		stamp+="recovery:$(stat -c '%Y:%s' "$recovery_dir" 2>/dev/null || true);"
+		stamp+="recovery:$(stat -c '%y:%z:%s:%i' "$recovery_dir" 2>/dev/null || true);"
 	fi
 	printf '%s\n' "$stamp"
 }
@@ -266,9 +266,6 @@ invalidate_mutation_ready_cache() {
 
 mutation_ready() {
 	local force=${1:-0}
-	if ((force == 0)) && mutation_ready_from_cache; then
-		return 0
-	fi
 	local parent probe snapshot managed_snapshot target path mode
 	[[ -x $appearance_helper && -x $apply_helper ]] || return 1
 	directory_path_ready "$runtime_base" true || return 1
@@ -314,6 +311,10 @@ mutation_ready() {
 		[[ ! -e $path || -w $path ]] || return 1
 		directory_path_ready "${path%/*}" || return 1
 	done
+	# Cached discovery never bypasses current ownership, permissions or path checks.
+	if ((force == 0)) && mutation_ready_from_cache; then
+		return 0
+	fi
 	snapshot=$(current_snapshot) || return 1
 	snapshot_source_is_safe "$snapshot" || return 1
 	managed_snapshot=$(snapshot_for "$managed_themes_file" "$managed_themes_file") || return 1
